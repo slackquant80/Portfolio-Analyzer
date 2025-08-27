@@ -1,0 +1,10 @@
+name: EMP_Portfolio_Analyzer
+title:
+username: slackquant
+account: slackquant
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 15279304
+bundleId: 10824414
+url: https://slackquant.shinyapps.io/EMP_Portfolio_Analyzer/
+version: 1

@@ -1,0 +1,1340 @@
+---
+title: "Global EMP Analyzer by Scott Lee"
+runtime: shiny
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    # source_code: embed
+    # vertical_layout: scroll
+    theme: 
+      version: 4
+      bootswatch: minty
+---
+
+<style type="text/css">
+  body{
+  font-size: 9pt;
+}
+</style>
+
+```{r setup, message = FALSE}
+
+# 로그수익률 기준 선택 추가할 것
+
+library(tidyverse)
+library(tidyquant)
+library(stringr)
+library(rvest)
+library(knitr)
+library(kableExtra)
+library(lubridate)
+library(readr)
+library(PerformanceAnalytics)
+library(timetk)
+library(corrplot)
+library(scales)
+library(cccp)
+library(flexdashboard)
+library(plotly)
+library(RiskPortfolios)
+
+```
+
+# Sidebar {.sidebar data-width="480"}
+
+##### **Portfolio Construction**
+
+- 웹 브라우저 글꼴 크기 80~90% 설정
+
+- 시작일보다 늦게 상장된 ETF가 존재하는 경우,
+
+  해당 ETF의 상장일 부터 결과 산출됨
+
+- 동일종목 중복 입력 및 ETF 공백시 에러
+- 미사용 ETF는 비중 0%로 입력
+
+- **[Yahoo Finance](https://finance.yahoo.com/)**
+<br>
+
+```{r}
+
+# fluidRow() -> row 생성
+# column(6, ) -> 길이 6짜리 주식 티커 입력 column 생성
+# stock1 -> 아래 코드에서 input$stock1으로 연결됨... Stock 1 -> app에서 엔드유저가 보는 입력창 이름...
+# "SPY" -> default 값...유저가 변화를 주지 않으면 이대로~
+
+# textInput, numericInput, dateInput, selectInput
+
+fluidRow(
+  column(3,
+         textInput("ETF1", "ETF 1", "VTI")),
+  column(3,
+         numericInput("w1", "Portf. %", 12, min = 0, max = 100)),
+  column(3,
+         textInput("ETF2", "ETF 2", "VEA")),
+  column(3,
+         numericInput("w2", "Portf. %", 12, min = 0, max = 100))
+) 
+
+fluidRow(
+  column(3,
+         textInput("ETF3", "ETF 3", "VWO")),
+  column(3,
+         numericInput("w3", "Portf. %", 12, min = 0, max = 100)),
+  column(3,
+         textInput("ETF4", "ETF 4", "EDV")),
+  column(3,
+         numericInput("w4", "Portf. %", 16, min = 0, max = 100))
+)
+
+fluidRow(
+  column(3,
+         textInput("ETF5", "ETF 5", "LTPZ")),
+  column(3,
+         numericInput("w5", "Portf. %", 20, min = 0, max = 100)),
+  column(3,
+         textInput("ETF6", "ETF 6", "EMLC")),
+  column(3,
+         numericInput("w6", "Portf. %", 7, min = 0, max = 100))
+)
+
+fluidRow(
+  column(3,
+         textInput("ETF7", "ETF 7", "VCLT")),
+  column(3,
+         numericInput("w7", "Portf. %", 5, min = 0, max = 100)),
+  column(3,
+         textInput("ETF8", "ETF 8", "DBC")),
+  column(3,
+         numericInput("w8", "Portf. %", 8, min = 0, max = 100))
+)
+
+fluidRow(
+  column(3,
+         textInput("ETF9", "ETF 9", "IAU")),
+  column(3,
+         numericInput("w9", "Portf. %", 8, min = 0, max = 100)),
+  column(3,
+         textInput("ETF10", "ETF 10", "GLD")),
+  column(3,
+         numericInput("w10", "Portf. %", 0, min = 0, max = 100))
+)
+
+fluidRow(
+  column(3,
+         textInput("ETF11", "ETF 11", "SPY")),
+  column(3,
+         numericInput("w11", "Portf. %", 0, min = 0, max = 100)),
+  column(3,
+         textInput("ETF12", "ETF 12", "SHY")),
+  column(3,
+         numericInput("w12", "Portf. %", 0, min = 0, max = 100))
+)
+
+fluidRow( 
+  column(4,
+         dateInput("date", "Starting Date", "2000-01-01", format = "yyyy-mm-dd")),
+  column(4,
+         dateInput("date_end", "Ending Date", "2022-04-30", format = "yyyy-mm-dd")),
+  column(4,
+         selectInput("period", "Period Setting",
+                     c("Up-to-date",
+                       "Subperiod")))
+)  
+
+fluidRow( 
+  column(3,
+         selectInput("rebalance", "Rebal. Freq.",
+                     c("Yearly" = "years",
+                       "Quarterly" = "quarters",
+                       "Monthly" = "months",
+                       "Weekly" = "weeks"))),
+  column(4,
+         selectInput("frequency", "Data Freq.",
+                     c("Monthly" = "monthly",
+                       "Daily" = "daily"))),
+  column(3,
+         numericInput("rf", "Rf Rate %", 2, min = 0, max = 20))
+)
+
+actionButton("go", "Submit")           # submit버튼 -> eventReactive() 사용하게 해줌
+
+
+#######################################################################################
+## 함수 설정
+
+ETF_rtn <- eventReactive(input$go, {     
+  # eventReactive() -> 어떤 이벤트 포착전에는 시작하지 않는..reactive 함수임
+  # portfolio_returns_byhand가 input$go를 기다리게 선언... by calling eventReactive(input$go...)
+  # 유저가 submit 버튼(우리가 go 라벨을 붙인..)을 클릭할때까지 기다림
+  
+  {
+  if(sum(input$w1, input$w2, input$w3, input$w4, input$w5, input$w6,
+         input$w7, input$w8, input$w9, input$w10, input$w11, input$w12) != 100) 
+    stop(str_c("The portfolio weights must sum to 100%! Currently ", 
+               sum(input$w1, input$w2, input$w3, input$w4, input$w5, input$w6,
+                   input$w7, input$w8, input$w9, input$w10, input$w11, input$w12)), "%")
+  }
+
+  # with progress bar         
+  withProgress(message = 'In Progress', value = 0, {
+            
+                        # increment progress bar
+                        incProgress(0.8)
+                        # stop eval to see progress bar long enough :)
+                        Sys.sleep(0.0)
+                        
+  # 아래부터는 앞에서 사용한 코드흐름...(다만 심볼, 비중, 시작일에 대한 유저인풋을 사용한다는 점)
+  symbols <- c(input$ETF1, input$ETF2, input$ETF3, input$ETF4, input$ETF5, input$ETF6,
+               input$ETF7, input$ETF8, input$ETF9, input$ETF10, input$ETF11, input$ETF12)
+  
+  # validate(need(input$w1 + input$w2 + input$w3 + input$w4 + input$w5 +
+  #                 input$w6 + input$w7 + input$w8 + input$w9 + input$w10 +
+  #                 input$w11 == 100,
+  #               "The portfolio weights must sum to 100%!")) 
+
+  # 기간 설정
+  start_date <- as.Date(input$date)
+  end_date   <- if (input$period == "Up-to-date") Sys.Date() - 1 else as.Date(input$date_end)
+  
+  # ETF 데이터 다운로드
+  etf_list <- map(symbols, ~ {
+    tq_get(.x, get = "stock.prices", from = start_date, to = end_date) %>%
+      select(date, adjusted) %>%
+      rename(!! .x := adjusted)
+  })
+  
+  # 병합 (NA 포함)
+  ETF_agg <- reduce(etf_list, full_join, by = "date")
+  
+  # 가장 짧은 시계열 기준 날짜 계산
+  first_valid_date <- ETF_agg %>%
+    pivot_longer(-date, names_to = "asset", values_to = "price") %>%
+    group_by(asset) %>%
+    summarise(first_date = min(date[!is.na(price)]), .groups = "drop") %>%
+    summarise(first_valid_date = max(first_date, na.rm = TRUE)) %>%
+    pull(first_valid_date)
+  
+  # 필터링 적용
+  ETF_agg <- ETF_agg %>%
+    filter(date >= first_valid_date)
+  
+  w <- c(input$w1/100, input$w2/100,
+         input$w3/100, input$w4/100, input$w5/100, input$w6/100, input$w7/100,
+         input$w8/100, input$w9/100, input$w10/100, input$w11/100, input$w12/100)
+  
+  ETF_returns_tq <-
+    ETF_agg %>% 
+    gather(asset, prices, -date) %>% 
+    group_by(asset) %>% 
+    tq_transmute(mutate_fun = periodReturn,
+                 period = input$frequency,
+                 type = "arithmetic")             # "arithmetic", "log"
+    
+  period.returns <- colnames(ETF_returns_tq[3])
+
+  ETF_returns_tq <- ETF_returns_tq %>%
+    spread(asset, period.returns) %>%
+    select(date, all_of(symbols)) %>%
+    slice(-1)
+
+  })
+    
+})
+
+# ETF 가격 불러와서 ETF 수익률 합치고 long 포맷까지 만든 함수
+portfolio_rtn <- eventReactive(input$go, {     
+ 
+  ETF_returns_tq <- ETF_rtn()
+  
+  ETF_returns_long <-
+    ETF_returns_tq %>% 
+    gather(asset, returns, -date) %>% 
+    group_by(asset)
+  
+  w <- c(input$w1/100, input$w2/100,
+         input$w3/100, input$w4/100, input$w5/100, input$w6/100, input$w7/100,
+         input$w8/100, input$w9/100, input$w10/100, input$w11/100, input$w12/100)
+  
+  portfolio_returns <-
+    ETF_returns_long %>% 
+    tq_portfolio(assets_col = asset,
+                 returns_col = returns,
+                 weights = w,
+                 col_rename = "returns",
+                 rebalance_on = input$rebalance)
+
+})
+
+ETF_cum_perf <- eventReactive(input$go, {     
+
+  ETF_returns_tq <- ETF_rtn()
+  
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+  
+  symbols <- c(input$ETF1, input$ETF2, input$ETF3, input$ETF4, input$ETF5, input$ETF6,
+               input$ETF7, input$ETF8, input$ETF9, input$ETF10, input$ETF11, input$ETF12)
+  
+  stack <- NULL
+  if (input$frequency == "monthly") {
+    risk_free <- input$rf / 100 / 12
+    } else {
+      risk_free <- input$rf / 100 / 252
+  }
+  # Sharpe Ratio 계산 등 이용 risk-free rate (단기채권ETF 수익률로 대체 가능)
+  for (m in 1:length(symbols)) {
+    
+    rtn_cum <- Return.cumulative(ETF_rtn_xts[, m]) # 누적수익률
+    rtn_yr <- Return.annualized(ETF_rtn_xts[, m]) # 연율화 수익률(기하)
+    
+    std_yr <- StdDev.annualized(ETF_rtn_xts[, m]) # 연율화 변동성
+    sr_yr <- SharpeRatio.annualized(ETF_rtn_xts[, m], Rf = risk_free, geometric = TRUE) # 기하평균 기준 연율화 수익률
+    MDD <- maxDrawdown(ETF_rtn_xts[, m]) # 최대 낙폭
+    cr_yr <- CalmarRatio(ETF_rtn_xts[, m])  # 연율화 수익률을 최대낙폭으로 나눈 값
+    
+    ETF_temp <- rbind(rtn_cum, rtn_yr, std_yr, sr_yr, MDD, cr_yr)
+    stack <- cbind(stack, ETF_temp)
+    
+  }
+  
+  # 티블로 바꿔주고 테이블 정리
+  ETF_Perf <- stack %>% 
+    tk_tbl(preserve_index = TRUE,
+           rename_index = "Risk/Return") %>% 
+    as_tibble()
+  
+})
+
+performance_yr <- eventReactive(input$go, {     
+
+  ETF_returns_tq <- ETF_rtn()
+  
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+  
+  symbols <- c(input$ETF1, input$ETF2, input$ETF3, input$ETF4, input$ETF5, input$ETF6,
+               input$ETF7, input$ETF8, input$ETF9, input$ETF10, input$ETF11, input$ETF12)
+  
+  stack2 <- NULL
+  for (m in 1:length(symbols)) {
+    
+    rtns_yr <- apply.yearly(ETF_rtn_xts[, m], Return.cumulative) # 연도별 수익률
+    # apply.yearly() 함수 내에 적용될 함수를 Return.cumulative로 설정하면 연도별 수익률 계산 가능
+    
+    stack2 <- cbind(stack2, rtns_yr)
+    
+  }
+  
+  # 티블로 바꿔주고 테이블 정리
+  ETF_rtns_yr <- stack2 %>% 
+    tk_tbl(preserve_index = TRUE,
+           rename_index = "Year") %>% 
+    as_tibble()
+  
+})
+
+component_contr <- eventReactive(input$go, { 
+  
+  ETF_returns_tq <- ETF_rtn()
+  
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+  
+  w <- c(input$w1/100, input$w2/100,
+         input$w3/100, input$w4/100, input$w5/100, input$w6/100, input$w7/100,
+         input$w8/100, input$w9/100, input$w10/100, input$w11/100, input$w12/100)
+  
+  # create covariance matrix
+  covmat <-
+    cov(ETF_rtn_xts)
+  # calculate portfolio standard deviation
+  sd_portfolio <-
+    sqrt(t(w) %*% covmat %*% w)
+  # calculate marginal contribution of each asset
+  marginal_contribution <-
+    w %*% covmat / sd_portfolio[1, 1]
+  # multiply marginal by weights vector
+  component_contribution <-
+    marginal_contribution * w
+  # divide by total standard deviation to get percentages
+  component_percentages <-
+    component_contribution / sd_portfolio[1, 1] %>% 
+    round(., 3)
+  
+  component_percentages <-
+    component_percentages %>% 
+    as_tibble() %>% 
+    gather(asset, contribution) %>% 
+    mutate(weights = w) %>% 
+    gather(type, percent, -asset) %>% 
+    group_by(type)
+  
+})
+
+efficient_frontier <- eventReactive(input$go2, { 
+  
+  # with progress bar         
+  withProgress(message = 'In Progress', value = 0, {
+            
+                        # increment progress bar
+                        incProgress(0.8)
+                        # stop eval to see progress bar long enough :)
+                        Sys.sleep(0.0)
+  
+    ETF_returns_tq <- ETF_rtn()
+    
+    ETF_rtn_xts <- ETF_returns_tq %>%
+      tk_xts(date_var = date)
+    
+    # 평균 수익률 계산
+    mean_ret <- colMeans(ETF_rtn_xts)
+    
+    # covariance matrix 계산, annualize
+    if (input$frequency == "daily") {
+      n_ann <- 252
+    } else {
+      n_ann <- 12
+    }
+    
+    cov_mat <- cov(ETF_rtn_xts) * n_ann
+    
+    symbols <- c(input$ETF1, input$ETF2, input$ETF3, input$ETF4, input$ETF5, input$ETF6,
+                 input$ETF7, input$ETF8, input$ETF9, input$ETF10, input$ETF11, input$ETF12)
+    
+    # random weights 만들기, uniform distribution 난수
+    wts <- runif(n = length(symbols)) 
+    
+    # 합계가 1이 되도록 만들기
+    wts <- wts / sum(wts)
+    
+    # annualized portfolio returns 계산
+    port_returns <- (sum(wts * mean_ret) + 1) ^ n_ann - 1
+    
+    # annualized standard deviation 계산(연율화된 cov_mat 사용)
+    port_risk <- sqrt(t(wts) %*% (cov_mat %*% wts))
+    
+    # Sharpe Ratio 계산
+    if (input$frequency == "monthly") {
+      risk_free <- input$rf / 100 / 12
+      } else {
+        risk_free <- input$rf / 100 / 252
+    }
+  
+    sharpe_ratio <- (port_returns - risk_free) / port_risk %>% 
+      round(., 2)
+    
+    # sharpe_ratio <- port_returns/port_risk
+    
+    ## n random portfolios
+    num_port <- input$n_simul
+    # num_port <- 500
+    
+    # Creating a matrix to store the weights
+    all_wts <- matrix(nrow = num_port,
+                      ncol = length(symbols))
+    
+    # Creating an empty vector to store
+    # Portfolio returns
+    
+    port_returns <- vector('numeric', length = num_port)
+    
+    # Creating an empty vector to store
+    # Portfolio Standard deviation
+    
+    port_risk <- vector('numeric', length = num_port)
+    
+    # Creating an empty vector to store
+    # Portfolio Sharpe Ratio
+    
+    sharpe_ratio <- vector('numeric', length = num_port)
+    
+    # loop n times
+    for (i in seq_along(port_returns)) {
+      
+      # print("")
+      
+      wts <- runif(length(symbols))
+      wts <- wts/sum(wts)
+      
+      # Storing weight in the matrix
+      all_wts[i,] <- wts
+      
+      # Portfolio returns
+      
+      port_ret <- sum(wts * mean_ret)
+      port_ret <- ((port_ret + 1) ^ n_ann) - 1
+      
+      # Storing Portfolio Returns values
+      port_returns[i] <- port_ret
+      
+      
+      # Creating and storing portfolio risk
+      port_sd <- sqrt(t(wts) %*% (cov_mat %*% wts))
+      port_risk[i] <- port_sd
+      
+      # Creating and storing Portfolio Sharpe Ratios
+      # Assuming 0% Risk free rate
+      
+      sr <- port_ret/port_sd
+      sharpe_ratio[i] <- sr
+      
+    }
+    
+    # Storing the values in the table
+    portfolio_values <- tibble(Return = port_returns,
+                               Risk = port_risk,
+                               SharpeRatio = sharpe_ratio)
+    
+    
+    # Converting matrix to a tibble and changing column names
+    all_wts <- tk_tbl(all_wts)
+    
+    colnames(all_wts) <- colnames(ETF_rtn_xts)
+    
+    # Combing all the values together
+    portfolio_values <- tk_tbl(cbind(all_wts, portfolio_values))
+    
+  })
+  
+})
+
+risk_parity <- eventReactive(input$go2, { 
+
+  ETF_returns_tq <- ETF_rtn()
+  
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+  
+  symbols <- c(input$ETF1, input$ETF2, input$ETF3, input$ETF4, input$ETF5, input$ETF6,
+               input$ETF7, input$ETF8, input$ETF9, input$ETF10, input$ETF11, input$ETF12)
+  
+  # create covariance matrix
+  covmat <-
+    cov(ETF_rtn_xts)
+  
+  # 위험기여도 계산
+  get_RC = function(w, covmat) {
+    port_vol = t(w) %*% covmat %*% w
+    port_std = sqrt(port_vol)
+    
+    MRC = (covmat %*% w) / as.numeric(port_std)
+    RC = MRC * w
+    RC = c(RC / sum(RC))
+    
+    return(RC)
+  }
+  
+  # rp() 함수를 이용한 최적화
+  # slsqp()나 optimalPortfolio() 함수를 이용해 구현 가능
+  # 간혹 최적화된 값을 찾지 못할 때 있음
+  # cccp패키지의 rp() 함수 사용하면 매우 정확
+  
+  opt = rp(x0 = rep(1/length(symbols), length(symbols)),       # 최적화를 위한 초기 입력값
+           P = covmat,                                         # 분산-공분산 행렬 입력
+           mrc = rep(1/length(symbols), length(symbols)))      # 목표로 하는 각 자산별 위험기여도 값 -> 동일하게
+  w = getx(opt) %>% drop()     # getx() 함수를 통해 해를 추출.. drop()을 통해 벡터 형태로 변환
+  w = (w / sum(w)) %>% 
+    round(., 4) %>% 
+    setNames(colnames(all_of(symbols)))
+
+})
+  
+max_diver <- eventReactive(input$go2, {
+  
+  ETF_returns_tq <- ETF_rtn()
+  
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+  
+  # create covariance matrix
+  covmat <-
+    cov(ETF_rtn_xts)
+  
+  w = optimalPortfolio(covmat,
+                     control = list(type = 'maxdiv',
+                                    constraint = 'lo')) %>% 
+  round(., 4)
+
+})
+
+```
+
+# **Portfolio Strategy Simulation**
+
+## Row
+
+### **Expected Return of Your Portfolio**
+
+```{r}
+
+renderValueBox({
+
+ETF_returns_tq <- ETF_rtn()
+  
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+    
+  w <- c(input$w1/100, input$w2/100, input$w3/100, input$w4/100, input$w5/100,
+         input$w6/100, input$w7/100, input$w8/100, input$w9/100, input$w10/100,
+         input$w11/100, input$w12/100)
+    
+  port_rtn_byinput = Return.portfolio(R = ETF_rtn_xts,
+                                      weights = w,
+                                      rebalance_on = input$rebalance,
+                                      verbose = TRUE)
+    
+  if (input$frequency == "monthly") {
+    risk_free <- input$rf / 100 / 12
+    } else {
+      risk_free <- input$rf / 100 / 252
+    }
+
+  port_rtn_yr <- Return.annualized(port_rtn_byinput$returns) %>% 
+    round(., 4)
+  
+  valueBox(str_c(port_rtn_yr * 100, "%"), icon = "fa-pencil", color = "primary")
+  
+})
+
+```
+
+### **Sharpe Ratio of Your Portfolio**
+
+```{r}
+
+renderValueBox({
+  ETF_returns_tq <- ETF_rtn()
+  
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+    
+  w <- c(input$w1/100, input$w2/100, input$w3/100, input$w4/100, input$w5/100,
+         input$w6/100, input$w7/100, input$w8/100, input$w9/100, input$w10/100,
+         input$w11/100, input$w12/100)
+    
+  port_rtn_byinput = Return.portfolio(R = ETF_rtn_xts,
+                                      weights = w,
+                                      rebalance_on = input$rebalance,
+                                      verbose = TRUE)
+    
+  if (input$frequency == "monthly") {
+    risk_free <- input$rf / 100 / 12
+    } else {
+      risk_free <- input$rf / 100 / 252
+    }
+
+  port_sr_yr <- SharpeRatio.annualized(port_rtn_byinput$returns, Rf = risk_free, geometric = TRUE) %>% 
+    round(., 2)
+  
+  valueBox(port_sr_yr, icon = "fa-github", color = "info")
+
+})
+
+```
+
+### **Maximun Drawdown of Your Portfolio**
+
+```{r}
+
+renderValueBox({
+  ETF_returns_tq <- ETF_rtn()
+  
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+    
+  w <- c(input$w1/100, input$w2/100, input$w3/100, input$w4/100, input$w5/100,
+         input$w6/100, input$w7/100, input$w8/100, input$w9/100, input$w10/100,
+         input$w11/100, input$w12/100)
+    
+  port_rtn_byinput = Return.portfolio(R = ETF_rtn_xts,
+                                      weights = w,
+                                      rebalance_on = input$rebalance,
+                                      verbose = TRUE)
+    
+  if (input$frequency == "monthly") {
+    risk_free <- input$rf / 100 / 12
+    } else {
+      risk_free <- input$rf / 100 / 252
+    }
+
+  port_MDD <- maxDrawdown(port_rtn_byinput$returns) %>% 
+    round(., 4)
+  
+  valueBox(str_c("-", port_MDD * 100, "%"), icon = "fa-bluetooth", color = ifelse(port_MDD > 0.2, "warning", "primary"))
+
+})
+
+```
+
+## Row {data-height="650"}
+
+### **Cumulative Performance**
+
+```{r}
+
+renderPlot({
+
+  ETF_returns_tq <- ETF_rtn()
+
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+  
+  w <- c(input$w1/100, input$w2/100, input$w3/100, input$w4/100, input$w5/100,
+         input$w6/100, input$w7/100, input$w8/100, input$w9/100, input$w10/100,
+         input$w11/100, input$w12/100)
+  
+  port_rtn_byinput = Return.portfolio(R = ETF_rtn_xts,
+                                      weights = w,
+                                      rebalance_on = input$rebalance,
+                                      verbose = TRUE)
+
+  port_test_rtn <- cbind(port_rtn_byinput$returns, ETF_rtn_xts)        #[, c(1, 5, 6, 10)])
+  names(port_test_rtn) <- c("Portfolio", colnames(ETF_rtn_xts))          #[, c(1, 5, 6, 10)]))
+
+  charts.PerformanceSummary(port_test_rtn,
+                            main = 'Portfolio Performance')
+
+})
+
+```
+
+### **Annual Returns (%)**
+
+```{r}
+
+renderTable({
+
+  ETF_returns_tq <- ETF_rtn()
+
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+  
+  w <- c(input$w1/100, input$w2/100, input$w3/100, input$w4/100, input$w5/100,
+         input$w6/100, input$w7/100, input$w8/100, input$w9/100, input$w10/100,
+         input$w11/100, input$w12/100)
+  
+  symbols <- c(input$ETF1, input$ETF2, input$ETF3, input$ETF4, input$ETF5, input$ETF6,
+               input$ETF7, input$ETF8, input$ETF9, input$ETF10, input$ETF11, input$ETF12)
+  
+  stack2 <- NULL
+  for (m in 1:length(symbols)) {
+    
+    rtns_yr <- apply.yearly(ETF_rtn_xts[, m], Return.cumulative) # 연도별 수익률
+    
+    stack2 <- cbind(stack2, rtns_yr)
+    
+  }
+  
+  port_rtn_byinput = Return.portfolio(R = ETF_rtn_xts,
+                                      weights = w,
+                                      rebalance_on = input$rebalance,
+                                      verbose = TRUE)
+  
+  port_rtns_yr <- apply.yearly(port_rtn_byinput$returns, Return.cumulative)
+
+  port_rtns_yr_tab <- cbind(port_rtns_yr, stack2) %>%       # [, c(1, 5, 6, 10)]) %>% 
+  fortify.zoo() %>% 
+  rename(Year = Index,
+         Portfolio = portfolio.returns)
+
+  port_rtns_yr_tab$Year <- format(port_rtns_yr_tab$Year, "%Y")
+  port_rtns_yr_tab[, -1] <- port_rtns_yr_tab[, -1] * 100
+
+  port_rtns_yr_tab
+  
+})
+
+```
+
+## Row {.tabset .tabset-fade}
+
+### **Performance Summary**
+
+```{r}
+
+renderTable({
+  
+  ETF_returns_tq <- ETF_rtn()
+
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_var = date)
+  
+  w <- c(input$w1/100, input$w2/100, input$w3/100, input$w4/100, input$w5/100,
+         input$w6/100, input$w7/100, input$w8/100, input$w9/100, input$w10/100,
+         input$w11/100, input$w12/100)
+  
+  port_rtn_byinput = Return.portfolio(R = ETF_rtn_xts,
+                                      weights = w,
+                                      rebalance_on = input$rebalance,
+                                      verbose = TRUE)
+  
+  symbols <- c(input$ETF1, input$ETF2, input$ETF3, input$ETF4, input$ETF5, input$ETF6,
+               input$ETF7, input$ETF8, input$ETF9, input$ETF10, input$ETF11, input$ETF12)
+  
+  stack <- NULL
+  if (input$frequency == "monthly") {
+    risk_free <- input$rf / 100 / 12
+    } else {
+      risk_free <- input$rf / 100 / 252
+  }
+  # Sharpe Ratio 계산 등 이용 risk-free rate (단기채권ETF 수익률로 대체 가능)
+  for (m in 1:length(symbols)) {
+    
+    rtn_cum <- Return.cumulative(ETF_rtn_xts[, m]) # 누적수익률
+    rtn_yr <- Return.annualized(ETF_rtn_xts[, m]) # 연율화 수익률(기하)
+    
+    std_yr <- StdDev.annualized(ETF_rtn_xts[, m]) # 연율화 변동성
+    sr_yr <- SharpeRatio.annualized(ETF_rtn_xts[, m], Rf = risk_free, geometric = TRUE) # 기하평균 기준 연율화 수익률
+    MDD <- maxDrawdown(ETF_rtn_xts[, m]) # 최대 낙폭
+    cr_yr <- CalmarRatio(ETF_rtn_xts[, m])  # 연율화 수익률을 최대낙폭으로 나눈 값
+    
+    ETF_temp <- rbind(rtn_cum, rtn_yr, std_yr, sr_yr, MDD, cr_yr)
+    stack <- cbind(stack, ETF_temp)
+    
+  }
+  
+  port_rtn_cum <- Return.cumulative(port_rtn_byinput$returns) # 누적수익률
+  port_rtn_yr <- Return.annualized(port_rtn_byinput$returns) # 연율화 수익률(기하)
+    
+  port_std_yr <- StdDev.annualized(port_rtn_byinput$returns) # 연율화 변동성
+  port_sr_yr <- SharpeRatio.annualized(port_rtn_byinput$returns, Rf = risk_free, geometric = TRUE) # 기하평균 기준 연율화 수익률
+  port_MDD <- maxDrawdown(port_rtn_byinput$returns) # 최대 낙폭
+  port_cr_yr <- CalmarRatio(port_rtn_byinput$returns)  # 연율화 수익률을 최대낙폭으로 나눈 값
+    
+  port_tab <- rbind(port_rtn_cum, port_rtn_yr, port_std_yr, port_sr_yr, port_MDD, port_cr_yr)
+  port_tab_agg <- cbind(port_tab, stack) %>%              #[, c(1, 5, 6, 10)]) %>%
+    tk_tbl(preserve_index = TRUE,
+           rename_index = "Risk/Return") %>% 
+    as_tibble() %>% 
+    rename(Portfolio = portfolio.returns)
+  
+  port_tab_agg[c(1, 2, 3, 5), -1] <- port_tab_agg[c(1, 2, 3, 5), -1] * 100
+  port_tab_agg <- port_tab_agg %>%
+    mutate_if(is.numeric, round, 2)
+  port_tab_agg$`Risk/Return`[1] <- "Cumulative Return (%)"
+  port_tab_agg$`Risk/Return`[2] <- "Annualized Return (%)"
+  port_tab_agg$`Risk/Return`[3] <- "Annualized Standard Deviation (%)"
+  port_tab_agg$`Risk/Return`[5] <- "MDD (%)"
+  
+  port_tab_agg
+  
+})
+
+```
+
+### **Risk Contribution**
+
+```{r}
+
+renderPlot({
+
+  component_percentages <- component_contr()
+
+  component_percentages %>% 
+  ggplot(aes(x = asset,
+           y = percent,
+           fill = type)) +
+  geom_col(position = 'dodge') +
+  scale_y_continuous(labels = percent) +
+  ggtitle("Percent Contribution to Volatility") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+})
+  
+```
+
+### **Histogram with Assets**
+
+```{r}
+
+renderPlot({
+
+  portfolio_rtn <-
+    portfolio_rtn()
+
+  ETF_returns_tq <- ETF_rtn()
+
+  ETF_returns_long <-
+    ETF_returns_tq %>%
+    gather(asset, returns, -date) %>%
+    group_by(asset)
+  
+  par(mrow=c(1, 2))
+  ETF_returns_long %>%
+    ggplot(aes(x = returns,
+               fill = asset)) +
+    geom_histogram(alpha = 0.15,
+                   binwidth = .01) +
+    geom_histogram(data = portfolio_rtn,
+                   fill = "cornflowerblue",
+                   binwidth = .01) +
+    ggtitle("Portfolio and Asset Returns") +
+    theme_update(plot.title = element_text(hjust = 0.5))
+  
+})
+
+```
+
+### **Histogram + Density**
+
+```{r}
+
+renderPlot({
+
+  portfolio_rtn() %>%
+    ggplot(aes(x = returns)) +
+    geom_histogram(alpha = 0.25, binwidth = .01, fill = "cornflowerblue") +
+    geom_density(geom = "line", size = 1, color = "red") +
+    xlab("Returns") +
+    ylab("Distribution") +
+    theme_update(plot.title = element_text(hjust = 0.5)) +
+    ggtitle("Portfolio Histogram and Density")
+
+})
+
+```
+
+# **Portfolio Optimization**
+
+## Row {data-height="850"}
+
+### **Portfolio Construction**
+
+##### **<확인사항>**
+
+- 사이드바의 ETF 유니버스를 기반으로 최적화
+
+- 사이드바 업데이트 이후 실행
+
+- **_사이드바 업데이트시 현재 페이지 활성화되어 있으면 작동 안함!_**
+
+##### **<포트폴리오 최적화 방법론>**
+
+- **<[Understanding Risk Parity - CME Group](https://www.cmegroup.com/education/files/understanding-risk-parity-2013-06.pdf)>**
+
+- **<[Risk Parity Is About Balance - Bridgewater](https://www.bridgewater.com/_document/risk-parity-is-about-balance?id=00000171-8606-d7de-affd-feaeffe80000)>**
+
+- **<[Global Risk Parity](https://investresolve.com/inc/uploads/pdf/ReSolve-Risk-Parity-A-Primer.pdf)>**
+
+- **<[Maximum Diversification - Man](https://www.man.com/maninstitute/ahl-explains-maximum-diversification)>**
+
+##### **<실행>**
+
+```{r}
+
+## 사이드바의 ETF 유니버스를 기반으로 최적화
+
+actionButton("go2", "Optimize")   
+
+fluidRow(
+  column(3,
+         numericInput("n_simul", "# of Random Portfolios", 10000)),
+)
+
+```
+
+### **Efficient Frontier** **<[Modern Portfolio Theory](https://www.investopedia.com/terms/m/modernportfoliotheory.asp)>**
+
+```{r}
+
+renderPlot({
+  
+  portfolio_values <- efficient_frontier()
+  
+  min_var <- portfolio_values[which.min(portfolio_values$Risk),]
+  max_sr <- portfolio_values[which.max(portfolio_values$SharpeRatio),]
+  
+  portfolio_values %>%
+    ggplot(aes(x = Risk, y = Return, color = SharpeRatio)) +
+    geom_point() +
+    theme_classic() +
+    scale_y_continuous(labels = scales::percent) +     # , limits = c(0.03, 0.08)
+    scale_x_continuous(labels = scales::percent, limits = c(0.04, 0.18)) +
+    labs(x = 'Annualized Risk',
+         y = 'Annualized Returns',
+         title = "Portfolio Optimization & Efficient Frontier") +
+    geom_point(aes(x = Risk,
+                   y = Return), data = min_var, color = 'red') +
+    geom_point(aes(x = Risk,
+                   y = Return), data = max_sr, color = 'red') +
+    geom_text(aes(x = min_var$Risk, y = min_var$Return, label = "Minimum Variance Portfolio"),
+              nudge_x = 0.000, nudge_y = -0.003) +
+    geom_text(aes(x = max_sr$Risk, y = max_sr$Return, label = "Tangency Portfolio"),
+              nudge_x = -0.005, nudge_y = 0.003)
+    # annotate('text', x = 0.09, y = 0.085, label = "Tangency Portfolio") +
+    # annotate('text', x = 0.10, y = 0.04, label = "Minimum variance portfolio") +
+    # annotate(geom = 'segment', x = 0.08, xend = 0.075,  y = 0.042,
+    #          yend = 0.05, color = 'red', arrow = arrow(type = "open")) +
+    # annotate(geom = 'segment', x = 0.09, xend = 0.09,  y = 0.083,
+    #          yend = 0.078, color = 'red', arrow = arrow(type = "open"))
+  
+  # ggplotly(p)
+
+})
+
+```
+  
+## Row
+
+### **Target Portfolio Weight (%)**
+
+```{r}
+  
+renderTable({
+  
+  symbols <- c(input$ETF1, input$ETF2, input$ETF3, input$ETF4, input$ETF5, input$ETF6,
+               input$ETF7, input$ETF8, input$ETF9, input$ETF10, input$ETF11, input$ETF12)
+   
+  portfolio_values <- efficient_frontier()
+  # The minimum variance portfolio
+  min_var <- portfolio_values[which.min(portfolio_values$Risk),]
+  # The tangency portfolio(the portfolio with highest sharpe ratio)
+  max_sr <- portfolio_values[which.max(portfolio_values$SharpeRatio),]
+  
+  risk_parity_w <- risk_parity()
+  max_diver_w <- max_diver()
+  
+  tab_target <- rbind(max_sr * 100, min_var * 100) %>%
+    round(., 2) %>%
+    select(all_of(symbols)) %>% 
+    rbind(., round(risk_parity_w * 100, 2), round(max_diver_w * 100, 2)) %>% 
+    mutate(Portfolio = c("Tangency Port.(Max Sharpe)", "Minimum Variance Port.", "Risk Parity", "Most Diversified")) %>% 
+    select(Portfolio, everything())
+    
+  tab_target
+
+})
+    
+```
+
+# **Asset Performance Analysis**
+
+## Row {.tabset .tabset-fade data-height="750"}
+
+### **Cumulative Performance**
+
+```{r}
+
+renderPlot({
+
+  ETF_returns_tq <- ETF_rtn()
+  
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_col = date)
+
+  chart.CumReturns(ETF_rtn_xts, wealth.index = TRUE, main = "Cumulative performance, Growth of $1, since inception", legend.loc = "topleft", plot.engine = "default")
+
+})
+
+```
+
+### **Annual Returns**
+
+```{r}
+
+renderPlot({
+
+  ETF_rtns_yr <- performance_yr()
+
+  # long 포맷으로 변경(ETF명으로 grouping)
+  performance_yr <- ETF_rtns_yr %>%
+    mutate(Year = year(Year)) %>%
+    gather(key, value, -Year) %>%
+    mutate(key = factor(key, levels = unique(key)))
+
+  performance_yr %>%
+    ggplot(aes(x = Year, y = value, fill = key)) +
+    geom_bar(position = "dodge", stat = "identity") +
+    ggtitle('Yearly Return') +
+    xlab(NULL) +
+    ylab(NULL) +
+    theme_bw() +
+    scale_y_continuous(expand = c(0.03, 0.03)) +
+    scale_x_continuous(expand = c(0.01, 0.01)) +
+    theme(plot.title = element_text(hjust = 0.5,
+                                    size = 12),
+          legend.position = 'bottom',
+          legend.title = element_blank(),
+          legend.text = element_text(size=15),
+          axis.text.x = element_text(angle = 45,
+                                     hjust = 1, size = 8),
+          panel.grid.minor.x = element_blank() ) +
+    guides(fill = guide_legend(byrow = TRUE)) +
+    geom_text(aes(label = paste(round(value * 100, 2), "%"),
+                  vjust = ifelse(value >= 0, -0.5, 1.5)),
+              position = position_dodge(width = 1),
+              size = 3)
+
+})
+
+```
+
+### **Asset Correlation**
+
+```{r}
+
+renderPlot({
+
+  ETF_returns_tq <- ETF_rtn()
+
+  ETF_rtn_xts <- ETF_returns_tq %>%
+    tk_xts(date_col = date)
+
+  asset_corr <- cor(ETF_rtn_xts)
+
+  asset_corr %>%
+  corrplot(method = 'color', type = 'upper',
+           addCoef.col = 'black', number.cex = 0.7,
+           tl.cex = 0.6, tl.srt = 45, tl.col = 'black',
+           col =
+             colorRampPalette(c('blue', 'white', 'red'))(200),
+           mar = c(0, 0, 3, 0),
+           title = ("Asset Correlations Since Inception"))
+
+})
+  
+```
+
+### **Distributions**
+
+```{r}
+
+renderPlot({
+
+  portfolio_rtn <-
+    portfolio_rtn()
+
+  ETF_returns_tq <- ETF_rtn()
+
+  ETF_returns_long <-
+    ETF_returns_tq %>%
+    gather(asset, returns, -date) %>%
+    group_by(asset)
+
+  ETF_returns_long %>%
+    ggplot(aes(x = returns)) +
+    geom_density(aes(color = asset), alpha = 1) +
+    geom_histogram(aes(fill = asset), alpha = 0.5, binwidth = .01) +
+    guides(fill = "none") +
+    facet_wrap(~asset) +
+    ggtitle("Returns Since Inception") +
+    xlab("Returns") +
+    ylab("Distribution") +
+    theme_update(plot.title = element_text(hjust = 0.5))
+
+})
+  
+```
+
+## Row {.tabset .tabset-fade}
+
+### **Risk / Return Profile**
+
+```{r}
+
+renderTable({
+
+  ETF_Perf <- ETF_cum_perf()
+
+  ETF_Perf[c(1, 2, 3, 5), -1] <- ETF_Perf[c(1, 2, 3, 5), -1] * 100
+  ETF_Perf <- ETF_Perf %>%
+    mutate_if(is.numeric, round, 2)
+  ETF_Perf$`Risk/Return`[1] <- "Cumulative Return (%)"
+  ETF_Perf$`Risk/Return`[2] <- "Annualized Return (%)"
+  ETF_Perf$`Risk/Return`[3] <- "Annualized Standard Deviation (%)"
+  ETF_Perf$`Risk/Return`[5] <- "MDD (%)"
+
+  ETF_Perf
+
+})
+
+```
+
+### **Annual Returns (%)**
+
+```{r}
+
+renderTable({
+
+  performance_yr <- performance_yr()
+
+  performance_yr$Year <- format(performance_yr$Year, "%Y")
+  performance_yr[, -1] <- performance_yr[, -1] * 100
+
+  performance_yr
+
+})
+
+```
+# **[Research] Quantitative Research**
+
+## Row
+
+### **<[AQR](https://www.aqr.com/Insights/Research)>**  **<- Ctrl + Click!**
+
+```{r}
+
+# URL <- "https://www.aqr.com/Insights/Research"
+# res <- read_html(URL)
+# 
+# # Case 2. Element
+# pattern <- ".cta--black"
+# title2 <- res %>% 
+#   html_nodes(pattern) %>% 
+#   html_text()
+# 
+# pattern <- ".article__date"
+# Date <- res %>% 
+#   html_nodes(pattern) %>% 
+#   html_text() %>% 
+#   str_trim()
+# 
+# # Case 3. Attribute
+# pattern <- ".cta--black"
+# link2 <- res %>% 
+#   html_nodes(pattern) %>% 
+#   html_attr("href") %>% 
+#   str_c("https://www.aqr.com", .)
+# 
+# tbl2 <- cbind(title2, Date, link2) %>% 
+#   as_tibble()
+# 
+# df2 <- tbl2 %>%
+#   mutate(Title = cell_spec(title2, "html", link = link2, color="#062872")) %>%
+#   select(Date, Title)
+# df2 %>% head(20) %>%
+#   kable(format="html", escape=FALSE) %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+### **<[AllocateSmartly](https://allocatesmartly.com/blog/)>**
+
+```{r}
+
+URL <- "https://allocatesmartly.com/blog/"
+res <- read_html(URL)
+
+# Case 2. Element
+pattern <- ".entry-title-link"
+title <- res %>% 
+  html_nodes(pattern) %>% 
+  html_text()
+
+pattern <- ".entry-content p"
+Content <- res %>% 
+  html_nodes(pattern) %>% 
+  html_text()
+
+# Case 3. Attribute
+pattern <- ".entry-title-link"
+link <- res %>% 
+  html_nodes(pattern) %>% 
+  html_attr("href")
+
+tbl <- cbind(title, link, Content) %>% 
+  as_tibble()
+
+df <- tbl %>%
+  mutate(Title = cell_spec(title, "html", link = link, color="#062872")) %>%
+  select(Title, Content)
+df %>% head(20) %>%
+  kable(format="html", escape=FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+## Row
+
+### **<[PanAgora](https://www.panagora.com/insights/)>**
+
+```{r}
+
+URL <- "https://www.panagora.com/insights/"
+res <- read_html(URL)
+
+
+# Case 2. Element
+pattern <- ".teal-green"
+Title <- res %>% 
+  html_nodes(pattern) %>% 
+  html_text()
+
+pattern <- ".excerpt"
+Content <- res %>% 
+  html_nodes(pattern) %>% 
+  html_text() %>% 
+  str_trim()
+
+pattern <- ".author"
+Author <- res %>% 
+  html_nodes(pattern) %>% 
+  html_text() %>% 
+  str_trim()
+
+pattern <- ".date"
+Date <- res %>% 
+  html_nodes(pattern) %>% 
+  html_text() %>% 
+  str_trim()
+
+# Case 3. Attribute
+pattern <- "#list-insights > article > a"
+link3 <- res %>% 
+  html_nodes(pattern) %>% 
+  html_attr("href")
+
+tbl3 <- cbind(Title, Date, Author, Content, link3) %>% 
+  as_tibble()
+
+df3 <- tbl3 %>%
+  mutate(Title = cell_spec(Title, "html", link = link3, color="#062872")) %>%
+  select(Date, Title, Author, Content)
+df3 %>% head(20) %>%
+  kable(format="html", escape=FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+### **<[Quantocracy](https://quantocracy.com/)>**
+
+```{r}
+
+## Quantocracy
+
+URL <- "https://quantocracy.com/"
+res <- read_html(URL)
+
+
+# Case 2. Element
+pattern <- "#qo-mashup > div > div.qo-content-col > a"
+Title <- res %>% 
+  html_nodes(pattern) %>% 
+  html_text() %>% 
+  str_trim()
+
+pattern <- "#qo-mashup > div > div.qo-content-col > div.qo-extras > div > em > span"
+Date <- res %>% 
+  html_nodes(pattern) %>% 
+  html_text() %>% 
+  str_trim() %>% 
+  str_remove(., ", ")
+
+# Case 3. Attribute
+pattern <- "#qo-mashup > div > div.qo-content-col > a"
+link4 <- res %>% 
+  html_nodes(pattern) %>% 
+  html_attr("href")
+
+tbl4 <- cbind(Title, Date) %>% 
+  as_tibble()
+
+df4 <- tbl4 %>%
+  mutate(Title = cell_spec(Title, "html", link = link4, color="#062872")) %>%
+  select(Date, Title)
+df4 %>% head(30) %>%
+  kable(format="html", escape=FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
